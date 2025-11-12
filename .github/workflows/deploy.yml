@@ -39,7 +39,22 @@ jobs:
             ${{ runner.os }}-node-
 
       - name: 📥 Install dependencies
-        run: npm ci
+        id: install-deps
+        run: |
+          echo "Installing dependencies with compatibility handling..."
+          
+          # Try npm ci first, fallback to npm install with legacy peer deps
+          if ! npm ci --legacy-peer-deps; then
+            echo "npm ci failed, trying npm install with legacy peer deps..."
+            if ! npm install --legacy-peer-deps; then
+              echo "::error::Failed to install dependencies"
+              echo "install_result=failed" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+          fi
+          
+          echo "✅ Dependencies installed successfully"
+          echo "install_result=success" >> $GITHUB_OUTPUT
 
       - name: 🧪 Run Jest tests with coverage
         id: test-coverage
@@ -155,12 +170,16 @@ jobs:
             echo "=== Failure Analysis ==="
             
             # Check specific failure reasons from job outputs
+            INSTALL_RESULT="${{ needs.build-test-deploy.outputs.install_result || 'unknown' }}"
             TEST_RESULT="${{ needs.build-test-deploy.outputs.test_result || 'unknown' }}"
             LINT_RESULT="${{ needs.build-test-deploy.outputs.lint_result || 'unknown' }}"
             BUILD_RESULT="${{ needs.build-test-deploy.outputs.build_result || 'unknown' }}"
             COVERAGE_VALUE="${{ needs.build-test-deploy.outputs.coverage_value || 'unknown' }}"
             
-            if [[ "$TEST_RESULT" == "failed" ]]; then
+            if [[ "$INSTALL_RESULT" == "failed" ]]; then
+              echo "❌ Deployment stopped: Dependency installation failed"
+              echo "   → Check for package version conflicts or network issues"
+            elif [[ "$TEST_RESULT" == "failed" ]]; then
               echo "❌ Deployment stopped: Test suite failed"
               echo "   → Check Jest test output for specific failures"
             elif [[ "$TEST_RESULT" == "coverage_failed" ]]; then
