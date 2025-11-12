@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+
+# Production builds
+dist/
+.angular/
+
+# Coverage and test reports
+coverage/
+*.coverage
+
+# Configuration files
+*.config.js
+*.conf.js
+
+# Generated files
+**/*.generated.ts
+
+# Environment files
+src/environments/
+
+# IDE and editor files
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Jest configuration
+jest.config.js
+setup-jest.ts
+
+# Angular specific
+angular.json
+tsconfig*.json
+
+# Git
+.git/
+.gitignore
+
+# Package managers
+package-lock.json
+yarn.lock
+*.tgz
+
+# Temporary files
+*.tmp
+*.temp
