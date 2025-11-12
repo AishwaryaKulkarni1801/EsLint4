@@ -20,6 +20,14 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      install_result: ${{ steps.npm-install.outputs.install_result }}
+      install_method: ${{ steps.npm-install.outputs.install_method }}
+      test_result: ${{ steps.test-coverage.outputs.test_result }}
+      coverage_value: ${{ steps.test-coverage.outputs.coverage_value }}
+      lint_result: ${{ steps.lint-check.outputs.lint_result }}
+      build_result: ${{ steps.build-project.outputs.build_result }}
+      build_method: ${{ steps.build-project.outputs.build_method }}
     steps:
       - name: 📦 Checkout repository
         uses: actions/checkout@v4
@@ -30,31 +38,53 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
-      - name: 📂 Cache node_modules
+      - name: 📂 Cache node_modules and .npm
         uses: actions/cache@v4
         with:
-          path: node_modules
+          path: |
+            node_modules
+            ~/.npm
           key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-node-
 
-      - name: 📥 Install dependencies
-        id: install-deps
+      - name: 🧹 Clean npm cache
         run: |
-          echo "Installing dependencies with compatibility handling..."
+          echo "Cleaning npm cache to prevent conflicts..."
+          npm cache clean --force
+
+      - name: 📥 Install dependencies with conflict resolution
+        id: npm-install
+        run: |
+          echo "Attempting npm ci with legacy peer deps..."
           
-          # Try npm ci first, fallback to npm install with legacy peer deps
-          if ! npm ci --legacy-peer-deps; then
-            echo "npm ci failed, trying npm install with legacy peer deps..."
-            if ! npm install --legacy-peer-deps; then
-              echo "::error::Failed to install dependencies"
+          # First attempt: npm ci with legacy-peer-deps
+          if npm ci --legacy-peer-deps; then
+            echo "✅ npm ci succeeded with legacy-peer-deps"
+            echo "install_method=npm-ci-legacy" >> $GITHUB_OUTPUT
+            echo "install_result=success" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ npm ci failed, attempting fallback to npm install..."
+            
+            # Fallback: npm install with legacy-peer-deps
+            if npm install --legacy-peer-deps; then
+              echo "✅ npm install succeeded with legacy-peer-deps"
+              echo "install_method=npm-install-legacy" >> $GITHUB_OUTPUT
+              echo "install_result=success" >> $GITHUB_OUTPUT
+            else
+              echo "::error::Both npm ci and npm install failed"
+              echo "install_method=failed" >> $GITHUB_OUTPUT
               echo "install_result=failed" >> $GITHUB_OUTPUT
+              
+              echo ""
+              echo "=== Dependency Installation Troubleshooting ==="
+              echo "1. Check package.json for version conflicts"
+              echo "2. Verify package-lock.json is compatible"
+              echo "3. Review peer dependency warnings above"
+              echo "================================================"
               exit 1
             fi
           fi
-          
-          echo "✅ Dependencies installed successfully"
-          echo "install_result=success" >> $GITHUB_OUTPUT
 
       - name: 🧪 Run Jest tests with coverage
         id: test-coverage
@@ -69,46 +99,30 @@ jobs:
             exit 1
           fi
           
-          # Parse coverage from Jest output (multiple methods)
-          COVERAGE=0
-          
-          # Method 1: Try coverage-summary.json (preferred)
+          # Parse coverage from Jest output
           if [ -f "coverage/coverage-summary.json" ]; then
             COVERAGE=$(node -p "
               const fs = require('fs');
               const coverage = JSON.parse(fs.readFileSync('coverage/coverage-summary.json', 'utf8'));
               Math.round(coverage.total.lines.pct);
             ")
-            echo "✅ Coverage parsed from coverage-summary.json: ${COVERAGE}%"
-          
-          # Method 2: Fallback to parsing console output
-          else
-            echo "coverage-summary.json not found, parsing console output..."
-            COVERAGE=$(grep -o "Lines[[:space:]]*:[[:space:]]*[0-9.]*%" coverage/lcov-report/index.html | head -1 | grep -o "[0-9.]*" | head -1 | cut -d'.' -f1 2>/dev/null || echo "0")
+            echo "Total coverage: ${COVERAGE}%"
+            echo "coverage=${COVERAGE}" >> $GITHUB_OUTPUT
             
-            if [ "$COVERAGE" = "0" ]; then
-              # Try parsing from text output
-              COVERAGE=$(grep "Lines" | grep -o "[0-9.]*%" | grep -o "[0-9.]*" | head -1 | cut -d'.' -f1 || echo "0")
-            fi
-            
-            if [ "$COVERAGE" = "0" ]; then
-              echo "::warning::Could not parse coverage percentage, assuming 0%"
+            if [ $COVERAGE -lt 80 ]; then
+              echo "::error::Code coverage below 80% (Actual: ${COVERAGE}%)"
+              echo "test_result=coverage_failed" >> $GITHUB_OUTPUT
+              echo "coverage_value=${COVERAGE}" >> $GITHUB_OUTPUT
+              exit 1
             else
-              echo "✅ Coverage parsed from output: ${COVERAGE}%"
+              echo "✅ Coverage check passed: ${COVERAGE}% >= 80%"
+              echo "test_result=passed" >> $GITHUB_OUTPUT
+              echo "coverage_value=${COVERAGE}" >> $GITHUB_OUTPUT
             fi
-          fi
-          
-          echo "coverage=${COVERAGE}" >> $GITHUB_OUTPUT
-          
-          if [ $COVERAGE -lt 80 ]; then
-            echo "::error::Code coverage below 80% (Actual: ${COVERAGE}%)"
-            echo "test_result=coverage_failed" >> $GITHUB_OUTPUT
-            echo "coverage_value=${COVERAGE}" >> $GITHUB_OUTPUT
-            exit 1
           else
-            echo "✅ Coverage check passed: ${COVERAGE}% >= 80%"
-            echo "test_result=passed" >> $GITHUB_OUTPUT
-            echo "coverage_value=${COVERAGE}" >> $GITHUB_OUTPUT
+            echo "::error::Coverage file not found"
+            echo "test_result=coverage_file_missing" >> $GITHUB_OUTPUT
+            exit 1
           fi
 
       - name: 🧹 Run ESLint validation
@@ -130,15 +144,36 @@ jobs:
         id: build-project
         run: |
           echo "Building Angular project..."
-          npm run build -- --base-href '/EsLint4/'
           
-          if [ $? -ne 0 ]; then
-            echo "::error::Build failed"
-            echo "build_result=failed" >> $GITHUB_OUTPUT
-            exit 1
-          else
+          # First attempt: regular build
+          if npm run build -- --base-href '/EsLint4/'; then
             echo "✅ Build completed successfully"
             echo "build_result=success" >> $GITHUB_OUTPUT
+            echo "build_method=standard" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ Standard build failed, attempting rebuild after cache clean..."
+            
+            # Clear any potential build cache and retry
+            rm -rf dist/ node_modules/.cache/ .angular/
+            
+            if npm run build -- --base-href '/EsLint4/'; then
+              echo "✅ Build completed successfully after cache clean"
+              echo "build_result=success" >> $GITHUB_OUTPUT
+              echo "build_method=retry-after-clean" >> $GITHUB_OUTPUT
+            else
+              echo "::error::Build failed after retry"
+              echo "build_result=failed" >> $GITHUB_OUTPUT
+              echo "build_method=failed" >> $GITHUB_OUTPUT
+              
+              echo ""
+              echo "=== Build Failure Troubleshooting ==="
+              echo "1. Check TypeScript compilation errors above"
+              echo "2. Verify angular.json configuration"
+              echo "3. Check for missing dependencies"
+              echo "4. Review environment-specific build settings"
+              echo "====================================="
+              exit 1
+            fi
           fi
 
       - name: 📋 Copy index.html to 404.html (SPA routing fix)
@@ -174,10 +209,11 @@ jobs:
             echo "📍 Check your site at: https://AishwaryaKulkarni1801.github.io/EsLint4/"
             echo ""
             echo "=== Deployment Summary ==="
+            echo "✅ Dependencies: Installed (${{ needs.build-test-deploy.outputs.install_method }})"
             echo "✅ Jest Tests: Passed"
-            echo "✅ Code Coverage: ≥ 80%"
+            echo "✅ Code Coverage: ≥ 80% (${{ needs.build-test-deploy.outputs.coverage_value }}%)"
             echo "✅ ESLint Validation: Passed"
-            echo "✅ Angular Build: Success"
+            echo "✅ Angular Build: Success (${{ needs.build-test-deploy.outputs.build_method }})"
             echo "✅ GitHub Pages: Deployed"
             echo "=========================="
           else
@@ -187,14 +223,18 @@ jobs:
             
             # Check specific failure reasons from job outputs
             INSTALL_RESULT="${{ needs.build-test-deploy.outputs.install_result || 'unknown' }}"
+            INSTALL_METHOD="${{ needs.build-test-deploy.outputs.install_method || 'unknown' }}"
             TEST_RESULT="${{ needs.build-test-deploy.outputs.test_result || 'unknown' }}"
             LINT_RESULT="${{ needs.build-test-deploy.outputs.lint_result || 'unknown' }}"
             BUILD_RESULT="${{ needs.build-test-deploy.outputs.build_result || 'unknown' }}"
+            BUILD_METHOD="${{ needs.build-test-deploy.outputs.build_method || 'unknown' }}"
             COVERAGE_VALUE="${{ needs.build-test-deploy.outputs.coverage_value || 'unknown' }}"
             
             if [[ "$INSTALL_RESULT" == "failed" ]]; then
-              echo "❌ Deployment stopped: Dependency installation failed"
-              echo "   → Check for package version conflicts or network issues"
+              echo "❌ Deployment stopped: npm dependency conflict"
+              echo "   → Method attempted: ${INSTALL_METHOD}"
+              echo "   → Check for ESLint/TypeScript version incompatibilities"
+              echo "   → Review package.json peer dependency requirements"
             elif [[ "$TEST_RESULT" == "failed" ]]; then
               echo "❌ Deployment stopped: Test suite failed"
               echo "   → Check Jest test output for specific failures"
@@ -209,14 +249,22 @@ jobs:
               echo "   → Fix linting errors before deployment"
             elif [[ "$BUILD_RESULT" == "failed" ]]; then
               echo "❌ Deployment stopped: Angular build failed"
-              echo "   → Check build output for compilation errors"
+              echo "   → Build method: ${BUILD_METHOD}"
+              echo "   → Check TypeScript compilation errors"
+              echo "   → Verify Angular configuration"
             else
               echo "❌ Deployment stopped: Unknown error occurred"
               echo "   → Check previous step logs for details"
             fi
             
             echo ""
-            echo "🔍 Troubleshooting Tips:"
+            echo "🔍 npm-related Troubleshooting Tips:"
+            echo "1. Run 'npm cache clean --force' locally"
+            echo "2. Run 'npm install --legacy-peer-deps' locally"
+            echo "3. Verify your package-lock.json is up to date"
+            echo "4. Check for conflicting peer dependencies"
+            echo ""
+            echo "🔍 General Troubleshooting Tips:"
             echo "1. Run 'npm test' locally to check test coverage"
             echo "2. Run 'npm run lint' locally to check ESLint issues"
             echo "3. Run 'npm run build' locally to verify build process"
