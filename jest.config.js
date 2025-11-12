@@ -18,7 +18,7 @@ module.exports = {
     '!src/environments/**'
   ],
   coverageDirectory: 'coverage',
-  coverageReporters: ['html', 'text-summary', 'lcov'],
+  coverageReporters: ['html', 'text-summary', 'lcov', 'json-summary'],
 
   // Ensure CI doesn't fail on current coverage by setting thresholds
   // Set thresholds at or below current project coverage. Adjust upward when you add tests.
