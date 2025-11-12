@@ -1,0 +1,189 @@
+name: Deploy Angular App to GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 📦 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 📂 Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: 📥 Install dependencies
+        run: npm ci
+
+      - name: 🧪 Run Jest tests with coverage
+        id: test-coverage
+        run: |
+          echo "Running Jest tests with coverage..."
+          npm run test -- --coverage --watchAll=false --verbose
+          
+          # Check if tests passed
+          if [ $? -ne 0 ]; then
+            echo "::error::Test suite failed"
+            echo "test_result=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Parse coverage from Jest output
+          if [ -f "coverage/coverage-summary.json" ]; then
+            COVERAGE=$(node -p "
+              const fs = require('fs');
+              const coverage = JSON.parse(fs.readFileSync('coverage/coverage-summary.json', 'utf8'));
+              Math.round(coverage.total.lines.pct);
+            ")
+            echo "Total coverage: ${COVERAGE}%"
+            echo "coverage=${COVERAGE}" >> $GITHUB_OUTPUT
+            
+            if [ $COVERAGE -lt 80 ]; then
+              echo "::error::Code coverage below 80% (Actual: ${COVERAGE}%)"
+              echo "test_result=coverage_failed" >> $GITHUB_OUTPUT
+              echo "coverage_value=${COVERAGE}" >> $GITHUB_OUTPUT
+              exit 1
+            else
+              echo "✅ Coverage check passed: ${COVERAGE}% >= 80%"
+              echo "test_result=passed" >> $GITHUB_OUTPUT
+              echo "coverage_value=${COVERAGE}" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "::error::Coverage file not found"
+            echo "test_result=coverage_file_missing" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: 🧹 Run ESLint validation
+        id: lint-check
+        run: |
+          echo "Running ESLint validation..."
+          npm run lint
+          
+          if [ $? -ne 0 ]; then
+            echo "::error::ESLint validation failed"
+            echo "lint_result=failed" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "✅ ESLint validation passed"
+            echo "lint_result=passed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 🏗️ Build Angular project
+        id: build-project
+        run: |
+          echo "Building Angular project..."
+          npm run build -- --base-href '/EsLint4/'
+          
+          if [ $? -ne 0 ]; then
+            echo "::error::Build failed"
+            echo "build_result=failed" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "✅ Build completed successfully"
+            echo "build_result=success" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 📋 Copy index.html to 404.html (SPA routing fix)
+        run: |
+          if [ -f "dist/es-lint4/index.html" ]; then
+            cp dist/es-lint4/index.html dist/es-lint4/404.html
+            echo "✅ Created 404.html for SPA routing"
+          else
+            echo "::warning::index.html not found in build output"
+          fi
+
+      - name: ⚙️ Configure GitHub Pages
+        uses: actions/configure-pages@v4
+
+      - name: 📤 Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./dist/es-lint4
+
+      - name: 🚀 Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: build-test-deploy
+    if: always()
+    steps:
+      - name: 📢 Deployment Notification
+        run: |
+          if [[ "${{ needs.build-test-deploy.result }}" == "success" ]]; then
+            echo "✅ Deployment succeeded! 🎉"
+            echo "📍 Check your site at: https://AishwaryaKulkarni1801.github.io/EsLint4/"
+            echo ""
+            echo "=== Deployment Summary ==="
+            echo "✅ Jest Tests: Passed"
+            echo "✅ Code Coverage: ≥ 80%"
+            echo "✅ ESLint Validation: Passed"
+            echo "✅ Angular Build: Success"
+            echo "✅ GitHub Pages: Deployed"
+            echo "=========================="
+          else
+            echo "❌ Deployment failed!"
+            echo ""
+            echo "=== Failure Analysis ==="
+            
+            # Check specific failure reasons from job outputs
+            TEST_RESULT="${{ needs.build-test-deploy.outputs.test_result || 'unknown' }}"
+            LINT_RESULT="${{ needs.build-test-deploy.outputs.lint_result || 'unknown' }}"
+            BUILD_RESULT="${{ needs.build-test-deploy.outputs.build_result || 'unknown' }}"
+            COVERAGE_VALUE="${{ needs.build-test-deploy.outputs.coverage_value || 'unknown' }}"
+            
+            if [[ "$TEST_RESULT" == "failed" ]]; then
+              echo "❌ Deployment stopped: Test suite failed"
+              echo "   → Check Jest test output for specific failures"
+            elif [[ "$TEST_RESULT" == "coverage_failed" ]]; then
+              echo "❌ Deployment stopped: Code coverage below 80% (Actual: ${COVERAGE_VALUE}%)"
+              echo "   → Add more unit tests to increase coverage"
+            elif [[ "$TEST_RESULT" == "coverage_file_missing" ]]; then
+              echo "❌ Deployment stopped: Coverage file not generated"
+              echo "   → Check Jest configuration for coverage output"
+            elif [[ "$LINT_RESULT" == "failed" ]]; then
+              echo "❌ Deployment stopped: ESLint validation failed"
+              echo "   → Fix linting errors before deployment"
+            elif [[ "$BUILD_RESULT" == "failed" ]]; then
+              echo "❌ Deployment stopped: Angular build failed"
+              echo "   → Check build output for compilation errors"
+            else
+              echo "❌ Deployment stopped: Unknown error occurred"
+              echo "   → Check previous step logs for details"
+            fi
+            
+            echo ""
+            echo "🔍 Troubleshooting Tips:"
+            echo "1. Run 'npm test' locally to check test coverage"
+            echo "2. Run 'npm run lint' locally to check ESLint issues"
+            echo "3. Run 'npm run build' locally to verify build process"
+            echo "=========================="
+          fi
